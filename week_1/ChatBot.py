@@ -14,16 +14,22 @@ class ChatAgent:
                         api_key=os.environ["OPENROUTER_API_KEY"],
         )
         self.my_list = [{"role": "system","content":system_prompt}]
+    
+    def summary(self):
+        self.my_list.append({'role':'user', 'content': 'summarize last 7 response in one python code so you can understand the longer converstation without loss of quality.'})
+        background_response = self.client.chat.completions.create(
+            model = self.model,
+            messages = self.my_list[1:]
+        )
+        back_response = background_response.choices[0].message.content
+        self.my_list = [self.my_list[0]]
+        self.my_list.append({"role":"assistant", "content": back_response})
+        pass
+    
+    
     def call_model(self,user_input: str) ->str :
             if len(self.my_list)>7:
-                self.my_list.append({'role':'user', 'content': 'summarize last 7 response in one python code so you can understand the longer converstation without loss of quality.'})
-                background_response = self.client.chat.completions.create(
-                    model = self.model,
-                    messages = self.my_list[1:]
-                )
-                back_response = background_response.choices[0].message.content
-                self.my_list = [self.my_list[0]]
-                self.my_list.append({"role":"assistant", "content": back_response})
+                self.summary()
             self.my_list.append({'role':'user', 'content': user_input})
             
             response = self.client.chat.completions.create(
@@ -33,5 +39,3 @@ class ChatAgent:
             response_ai = response.choices[0].message.content
             self.my_list.append({"role":"assistant","content": response_ai})
             return response_ai
-        
-        
