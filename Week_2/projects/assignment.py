@@ -1,15 +1,16 @@
 import os
 import json
 import requests
-import urllib.request
-
-import xml.etree.ElementTree as ET
+import asyncio
 from openai import OpenAI
 from dotenv import load_dotenv
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Header, Footer, Input, RichLog
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 load_dotenv()
 
@@ -82,7 +83,6 @@ TOOLS = [
     }
 ]
 
-# 2. Tool Implementations 
 
 def search_web(query: str) -> dict:
     url = "https://google.serper.dev/search"
@@ -109,34 +109,38 @@ def read_page(url: str) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
+
+
+MCP_SERVER_PARAMS = StdioServerParameters(
+    command="npx",
+    args=["-y", "alphaxiv-mcp-server"]
+)
+
+async def _call_mcp_server(tool_name: str, arguments: dict) -> str:
+    """Core async function to connect to the MCP server and execute a tool."""
+    async with stdio_client(MCP_SERVER_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments=arguments)
+            return result.content[0].text
+
 def discover_papers(query: str) -> dict:
-    safe_query = query.replace(" ", "+")
-    url = f'http://export.arxiv.org/api/query?search_query=all:{safe_query}&start=0&max_results=3'
+    """Bridge: Runs the async MCP call inside the synchronous dispatcher."""
     try:
-        data = urllib.request.urlopen(url).read()
-        root = ET.fromstring(data)
-        papers = []
-        for entry in root.findall('{http://www.w3.org/2005/Atom}entry'):
-            paper_id = entry.find('{http://www.w3.org/2005/Atom}id').text.split('/')[-1]
-            title = entry.find('{http://www.w3.org/2005/Atom}title').text.replace('\n', ' ')
-            papers.append({"id": paper_id, "title": title})
-        return {"papers": papers}
+        result_text = asyncio.run(_call_mcp_server("discover_papers", {"query": query}))
+        return {"result": result_text}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"MCP Server Connection Failed: {str(e)}"}
 
 def get_paper_content(paper_id: str) -> dict:
-    url = f'http://export.arxiv.org/api/query?id_list={paper_id}'
+    """Bridge: Runs the async MCP call inside the synchronous dispatcher."""
     try:
-        data = urllib.request.urlopen(url).read()
-        root = ET.fromstring(data)
-        entry = root.find('{http://www.w3.org/2005/Atom}entry')
-        if entry is not None:
-            title = entry.find('{http://www.w3.org/2005/Atom}title').text.replace('\n', ' ')
-            abstract = entry.find('{http://www.w3.org/2005/Atom}summary').text.replace('\n', ' ')
-            return {"title": title, "abstract": abstract}
-        return {"error": "Paper not found."}
+        result_text = asyncio.run(_call_mcp_server("get_paper_content", {"paper_id": paper_id}))
+        return {"result": result_text}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"MCP Server Connection Failed: {str(e)}"}
+
+
 
 TOOL_REGISTRY = {
     "search_web": search_web,
@@ -166,7 +170,6 @@ def trim_history(messages: list[dict], max_turns: int) -> list[dict]:
     history = messages[1:][-(max_turns*2):]
     return system_prompt + history
 
-# 4. Textual UI & Agent Loop
 
 class ChatApp(App):
     TITLE = "Autonomous Research Agent"
@@ -195,7 +198,7 @@ class ChatApp(App):
 
     def on_mount(self) -> None:
         log = self.query_one("#log", RichLog)
-        log.write("[bold green]Research Agent Online.[/bold green] Ctrl+Q to quit.\n")
+        log.write("Research Agent Online. Ctrl+Q to quit.\n")
         self.query_one(Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -225,7 +228,7 @@ class ChatApp(App):
                 if finish_reason == "tool_calls":
                     self.messages.append(message)
                     for tool_call in message.tool_calls:
-                        self.call_from_thread(log.write, f"[dim italic]...using tool: {tool_call.function.name}[/dim italic]")
+                        self.call_from_thread(log.write, f"-using tool: {tool_call.function.name}")
                         result_json = dispatch(tool_call)
                         self.messages.append({
                             "role": "tool",
@@ -235,10 +238,10 @@ class ChatApp(App):
                 elif finish_reason == "stop":
                     reply = message.content
                     self.messages.append({'role': "assistant", "content": reply})
-                    self.call_from_thread(log.write, f"\n[bold magenta][Agent][/bold magenta] {reply}\n")
+                    self.call_from_thread(log.write, f"\n [Agent] {reply}\n")
                     break
         except Exception as e:
-            self.call_from_thread(log.write, f"\n[bold red]Error:[/bold red] {str(e)}\n")
+            self.call_from_thread(log.write, f"\nError:{str(e)}\n")
 
     def action_clear_display(self) -> None:
         self.query_one("#log", RichLog).clear()
@@ -247,7 +250,7 @@ class ChatApp(App):
         self.messages = [self.messages[0]]
         log = self.query_one("#log", RichLog)
         log.clear()
-        log.write("[bold yellow]Memory wiped. Fresh start.[/bold yellow]\n")
+        log.write("Memory wiped. Fresh start.\n")
 
 if __name__ == "__main__":
     ChatApp().run()
